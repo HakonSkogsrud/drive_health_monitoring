@@ -1,0 +1,59 @@
+#!/bin/bash
+
+monitor_drive_health() {
+    local host="$1"
+    shift
+    local disks=("$@")
+
+    echo "--- Monitoring Drive Health on $host ---"
+
+    for disk in "${disks[@]}"; do
+        # Execute smartctl -H remotely via SSH
+        REMOTE_OUTPUT=$(ssh "$host" "smartctl -H '$disk' 2>&1 || exit 1" | grep "SMART overall-health self-assessment test result:")
+
+        if [ $? -eq 0 ] && [ -n "$REMOTE_OUTPUT" ]; then
+            SMART_HEALTH=$(echo "$REMOTE_OUTPUT" | awk '{print $NF}')
+            if [ "$SMART_HEALTH" != "PASSED" ]; then
+                echo "WARNING: Disk $disk on $host SMART health is $SMART_HEALTH"
+                echo "Fetching full SMART report for $disk..."
+                ssh "$host" "smartctl -a '$disk'" 
+                echo ""
+            else
+                echo -n "INFO: Disk $disk on $host SMART health is PASSED."
+            fi
+        else
+            echo "ERROR: Could not retrieve SMART health for $disk on $host. Check if the disk path is correct or smartmontools is installed and working on the remote host."
+            ssh "$host" "smartctl -a '$disk' || echo 'Failed to run smartctl on remote host for $disk.'"
+            echo ""
+        fi
+
+        PERCENTAGE_USED=$(ssh "$host" "smartctl -A '$disk' | grep 'Percentage Used:' | awk '{print \$3}'")
+        if [ -n "$PERCENTAGE_USED" ]; then
+            echo " Percentage Used: $PERCENTAGE_USED"
+        fi
+    done
+
+    echo "--- Monitoring ZFS Pool Health on $host ---"
+
+    # Check ZFS pool status remotely
+    ZFS_STATUS_OUTPUT=$(ssh "$host" "zpool status -x -v 2>&1")
+
+    if [ $? -eq 0 ]; then
+        if echo "$ZFS_STATUS_OUTPUT" | grep -q "all pools are healthy"; then
+            echo "INFO: All ZFS pools on $host are healthy."
+        else
+            echo "WARNING: ZFS pools on $host are not entirely healthy or have issues."
+            echo "$ZFS_STATUS_OUTPUT"
+        fi
+    else
+        echo "ERROR: Could not retrieve ZFS pool status from $host. Check if ZFS is configured or the command 'zpool' is available."
+        echo "Remote output:"
+        echo "$ZFS_STATUS_OUTPUT"
+    fi
+}
+
+# Example usage
+REMOTE_HOST="root@10.0.0.41"
+DISKS=("/dev/nvme0n1" "/dev/nvme1n1")
+
+monitor_drive_health "$REMOTE_HOST" "${DISKS[@]}"
